@@ -1,11 +1,18 @@
 {
-  "name": "starter-node",
-  "private": true,
-  "version": "1.0.0",
+  "name": "better-auth-invite",
+  "author": "Massimiliano Mirra <hyperstruct@gmail.com>",
+  "repository": "https://github.com/bard/better-auth-invite",
+  "version": "0.1.0",
+  "license": "MIT",
+  "keywords": [
+    "authentication",
+    "better-auth",
+    "invite",
+    "invitation",
+    "plugin"
+  ],
   "type": "module",
   "scripts": {
-    "dev": "tsx watch -r dotenv-flow/config src/index.ts",
-    "start": "node -r dotenv-flow/config dist/index.js",
     "format": "biome format --write src",
     "lint": "biome check --write src",
     "lint:unused-exports": "ts-unused-exports ./tsconfig.json --maxIssues=0",
@@ -15,11 +22,22 @@
     "typecheck": "tsc --noEmit",
     "typecheck:watch": "tsc --noEmit --watch"
   },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
   "devDependencies": {
+    "@better-auth-kit/tests": "^0.2.0",
     "@biomejs/biome": "1.9.4",
     "@tsconfig/node22": "^22.0.2",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.15.21",
     "@vitest/coverage-v8": "^1.1.0",
+    "better-auth": "^1.2.8",
+    "better-sqlite3": "^11.10.0",
+    "dotenv-flow": "^4.1.0",
     "lefthook": "^1.5.5",
     "ts-unused-exports": "^10.0.1",
     "tsx": "^4.7.0",
@@ -30,12 +48,11 @@
     "node": ">=22"
   },
   "dependencies": {
-    "dotenv-flow": "^4.0.1",
-    "kysely": "^0.26.3",
-    "pino": "^8.17.1",
-    "pino-pretty": "^10.3.0",
-    "ts-custom-error": "^3.3.1",
-    "ts-essentials": "^9.4.1",
+    "@better-fetch/fetch": "^1.1.18",
     "zod": "^3.22.4"
-  }
+  },
+  "peerDependencies": {
+    "better-auth": "^1.2.8"
+  },
+  "onlyBuiltDependencies": ["better-sqlite3"]
 }

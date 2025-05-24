@@ -19,7 +19,23 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true
+      "recommended": true,
+      "complexity": {
+        "useLiteralKeys": "warn",
+        "noForEach": "warn"
+      },
+      "correctness": {
+        "noUnusedVariables": "warn",
+        "noUnusedImports": "warn"
+      },
+      "suspicious": {
+        "noExplicitAny": "warn"
+      },
+      "style": {
+        "useConst": "error",
+        "noNonNullAssertion": "warn",
+        "noUnusedTemplateLiteral": "warn"
+      }
     }
   },
   "javascript": {
