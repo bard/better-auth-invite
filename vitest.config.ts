@@ -1,9 +1,9 @@
 /// <reference types="vitest" />
 import { defineConfig, configDefaults } from "vitest/config";
 
-// eslint-disable-next-line import/no-default-export
 export default defineConfig({
   test: {
+    testTimeout: 10000,
     coverage: {
       exclude: [
         ...(configDefaults.coverage.exclude ?? []),

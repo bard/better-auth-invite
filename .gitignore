@@ -3,6 +3,6 @@ node_modules
 .env
 .env*.local
 /.project
-dist
+#dist
 .log
 /coverage
