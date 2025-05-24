@@ -1,4 +1,3 @@
-import type { BetterAuthPlugin } from "better-auth";
 import {
   APIError,
   createAuthEndpoint,
@@ -7,29 +6,13 @@ import {
 } from "better-auth/api";
 import { generateRandomString } from "better-auth/crypto";
 import { z } from "zod";
-
-export interface InviteOptions {
-  inviteDurationSeconds: number;
-  generateId?: () => string;
-  getDate?: () => Date;
-  signupRequiresInvite?: boolean;
-}
-
-type Invite = {
-  code: string;
-  expiresAt: Date;
-  usedAt: Date | null;
-};
-
-export const invite = (options: InviteOptions) => {
+export const invite = (options) => {
   const idGenerator =
     options.generateId ?? (() => generateRandomString(6, "0-9", "A-Z"));
   const getDate = options.getDate ?? (() => new Date());
-
   const ERROR_CODES = {
     USER_NOT_LOGGED_IN: "User must be logged in to create an invite",
-  } as const;
-
+  };
   return {
     id: "invite",
     $ERROR_CODES: ERROR_CODES,
@@ -63,13 +46,11 @@ export const invite = (options: InviteOptions) => {
               message: ERROR_CODES.USER_NOT_LOGGED_IN,
             });
           }
-
           const code = idGenerator();
           const now = getDate();
           const expiresAt = new Date(
             now.getTime() + options.inviteDurationSeconds * 1000,
           );
-
           await ctx.context.adapter.create({
             model: "invite",
             data: {
@@ -80,7 +61,6 @@ export const invite = (options: InviteOptions) => {
               expiresAt,
             },
           });
-
           return ctx.json({ code }, { status: 201 });
         },
       ),
@@ -94,22 +74,18 @@ export const invite = (options: InviteOptions) => {
         },
         async (ctx) => {
           const code = ctx.body.code;
-
-          const invite = await ctx.context.adapter.findOne<Invite>({
+          const invite = await ctx.context.adapter.findOne({
             model: "invite",
             where: [{ field: "code", value: code }],
           });
-
           if (!invite) {
             return ctx.redirect("/auth/signin?error=invalid_invite");
           }
-
           ctx.setCookie("better-auth.invite-code", code, {
             httpOnly: true,
             path: "/",
             expires: invite.expiresAt ? new Date(invite.expiresAt) : undefined,
           });
-
           return ctx.json({}, { status: 200 });
         },
       ),
@@ -122,14 +98,12 @@ export const invite = (options: InviteOptions) => {
             if (ctx.path.startsWith("/sign-up")) {
               const signupRequiresInvite = options.signupRequiresInvite ?? true;
               const inviteCode = ctx.getCookie("better-auth.invite-code");
-
               if (inviteCode !== null) {
                 // An invite code was provided, validate it
-                const invite = await ctx.context.adapter.findOne<Invite>({
+                const invite = await ctx.context.adapter.findOne({
                   model: "invite",
                   where: [{ field: "code", value: inviteCode }],
                 });
-
                 if (
                   !invite ||
                   getDate() > new Date(invite.expiresAt) ||
@@ -152,25 +126,20 @@ export const invite = (options: InviteOptions) => {
           }),
         },
       ],
-
       after: [
         {
           matcher: (context) => context.path.startsWith("/sign-up"),
           handler: createAuthMiddleware(async (ctx) => {
             if (ctx.path.startsWith("/sign-up")) {
               const user = ctx.context.session?.user;
-
               if (user === undefined) return;
-
               const inviteCode = ctx.getCookie("better-auth.invite-code");
               if (inviteCode !== null) {
-                const invite = await ctx.context.adapter.findOne<Invite>({
+                const invite = await ctx.context.adapter.findOne({
                   model: "invite",
                   where: [{ field: "code", value: inviteCode }],
                 });
-
                 if (invite === null) return;
-
                 await ctx.context.adapter.update({
                   model: "invite",
                   where: [{ field: "code", value: inviteCode }],
@@ -185,7 +154,6 @@ export const invite = (options: InviteOptions) => {
         },
       ],
     },
-  } satisfies BetterAuthPlugin;
+  };
 };
-
 export * from "./client.js";
