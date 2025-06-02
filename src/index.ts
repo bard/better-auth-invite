@@ -1,18 +1,20 @@
 import type { BetterAuthPlugin } from "better-auth";
 import {
-  APIError,
   createAuthEndpoint,
   createAuthMiddleware,
   sessionMiddleware,
 } from "better-auth/api";
 import { generateRandomString } from "better-auth/crypto";
+import type { UserWithRole } from "better-auth/plugins";
 import { z } from "zod";
 
 export interface InviteOptions {
   inviteDurationSeconds: number;
+  roleForSignupWithoutInvite: string;
+  roleForSignupWithInvite: string;
+  canCreateInvite?: (user: UserWithRole) => boolean;
   generateCode?: () => string;
   getDate?: () => Date;
-  signupRequiresInvite: boolean;
 }
 
 type Invite = {
@@ -31,6 +33,9 @@ export const invite = (options: InviteOptions) => {
 
   const ERROR_CODES = {
     USER_NOT_LOGGED_IN: "User must be logged in to create an invite",
+    INSUFFICIENT_PERMISSIONS:
+      "User does not have sufficient permissions to create invite",
+    NO_SUCH_USER: "No such user",
   } as const;
 
   return {
@@ -44,10 +49,37 @@ export const invite = (options: InviteOptions) => {
           use: [sessionMiddleware],
         },
         async (ctx) => {
-          const user = ctx.context.session?.user;
-          if (!user) {
+          const userId = ctx.context.session?.user?.id;
+          if (userId === undefined) {
             throw ctx.error("BAD_REQUEST", {
               message: ERROR_CODES.USER_NOT_LOGGED_IN,
+            });
+          }
+
+          const user = await ctx.context.internalAdapter.findUserById(userId);
+
+          if (user === null) {
+            throw ctx.error("BAD_REQUEST", {
+              message: ERROR_CODES.NO_SUCH_USER,
+            });
+          }
+
+          let canCreateInvite: boolean;
+          if (options.canCreateInvite !== undefined) {
+            canCreateInvite = options.canCreateInvite(user);
+          } else {
+            const isGuest =
+              user !== null &&
+              "role" in user &&
+              typeof user.role === "string" &&
+              user.role === options.roleForSignupWithoutInvite;
+
+            canCreateInvite = !isGuest;
+          }
+
+          if (!canCreateInvite) {
+            throw ctx.error("BAD_REQUEST", {
+              message: ERROR_CODES.INSUFFICIENT_PERMISSIONS,
             });
           }
 
@@ -102,72 +134,88 @@ export const invite = (options: InviteOptions) => {
       ),
     },
     hooks: {
-      before: [
-        {
-          matcher: (context) => context.path.startsWith("/sign-up"),
-          handler: createAuthMiddleware(async (ctx) => {
-            if (ctx.path.startsWith("/sign-up")) {
-              const signupRequiresInvite = options.signupRequiresInvite ?? true;
-              const inviteCode = ctx.getCookie("better-auth.invite-code");
-
-              if (inviteCode !== null) {
-                // An invite code was provided, validate it
-                const invite = await ctx.context.adapter.findOne<Invite>({
-                  model: "invite",
-                  where: [{ field: "code", value: inviteCode }],
-                });
-
-                if (
-                  !invite ||
-                  opts.getDate() > new Date(invite.expiresAt) ||
-                  invite.usedAt !== null
-                ) {
-                  throw new APIError("FORBIDDEN", {
-                    message: "Invalid, expired, or already used invite code.",
-                  });
-                }
-              } else {
-                // No invite code was provided
-                if (signupRequiresInvite) {
-                  throw new APIError("FORBIDDEN", {
-                    message: "An invite code is required to sign up.",
-                  });
-                }
-                // If signup does not require an invite, and no code was provided, proceed.
-              }
-            }
-          }),
-        },
-      ],
-
       after: [
         {
-          matcher: (context) => context.path.startsWith("/sign-up"),
+          matcher: (context) =>
+            context.path === "/sign-up/email" ||
+            context.path === "/sign-in/email" ||
+            context.path === "/sign-in/email-otp" ||
+            // For social logins, newSession is not available at the end of the initial /sign-in call
+            context.path === "/callback/:id",
+
           handler: createAuthMiddleware(async (ctx) => {
-            if (ctx.path.startsWith("/sign-up")) {
-              const user = ctx.context.session?.user;
+            const validation = z
+              .object({
+                user: z.object({ id: z.string() }),
+              })
+              .safeParse(ctx.context.newSession);
 
-              if (user === undefined) return;
-
-              const inviteCode = ctx.getCookie("better-auth.invite-code");
-              if (inviteCode !== null) {
-                const invite = await ctx.context.adapter.findOne<Invite>({
-                  model: "invite",
-                  where: [{ field: "code", value: inviteCode }],
-                });
-
-                if (invite === null) return;
-
-                await ctx.context.adapter.update({
-                  model: "invite",
-                  where: [{ field: "code", value: inviteCode }],
-                  update: {
-                    usedByUserId: user.id,
-                    usedAt: opts.getDate(),
-                  },
-                });
-              }
+            if (!validation.success) {
+              return;
             }
+
+            const {
+              user: { id: userId },
+            } = validation.data;
+
+            const user = await ctx.context.internalAdapter.findUserById(userId);
+
+            const isGuest =
+              user !== null &&
+              "role" in user &&
+              typeof user.role === "string" &&
+              user.role === options.roleForSignupWithoutInvite;
+
+            if (!isGuest) {
+              return;
+            }
+
+            const inviteCode = ctx.getCookie("better-auth.invite-code");
+
+            if (inviteCode === null) {
+              return;
+            }
+
+            const invite = await ctx.context.adapter.findOne<Invite>({
+              model: "invite",
+              where: [{ field: "code", value: inviteCode }],
+            });
+
+            if (invite === null) {
+              return;
+            }
+
+            // Additional check: ensure invite is not already used
+            if (invite.usedAt !== null) {
+              return;
+            }
+
+            // Additional check: ensure invite is not expired
+            if (invite.expiresAt.getTime() < opts.getDate().getTime()) {
+              return;
+            }
+
+            await ctx.context.adapter.update({
+              model: "user",
+              where: [{ field: "id", value: userId }],
+              update: { role: options.roleForSignupWithInvite },
+            });
+
+            const usageDate = opts.getDate();
+            await ctx.context.adapter.update({
+              model: "invite",
+              where: [{ field: "code", value: inviteCode }],
+              update: {
+                usedByUserId: userId,
+                usedAt: usageDate,
+              },
+            });
+
+            ctx.setCookie("better-auth.invite-code", "", {
+              path: "/",
+              httpOnly: true,
+              expires: new Date(0), // Set to epoch to clear
+            });
           }),
         },
       ],
