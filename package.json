@@ -54,5 +54,7 @@
   "peerDependencies": {
     "better-auth": "^1.2.8"
   },
-  "onlyBuiltDependencies": ["better-sqlite3"]
+  "onlyBuiltDependencies": [
+    "better-sqlite3"
+  ]
 }
