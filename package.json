@@ -2,7 +2,7 @@
   "name": "better-auth-invite",
   "author": "Massimiliano Mirra <hyperstruct@gmail.com>",
   "repository": "https://github.com/bard/better-auth-invite",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "license": "MIT",
   "keywords": [
     "authentication",
