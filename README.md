@@ -15,11 +15,11 @@
 
 `better-auth-invite` works in concert with the `admin` plugin and its access control capabilities.
 
-When a user redeems a valid invite, the invite code gets stored into a signed, http-only cookie in the user's browser.
+When a user activates a valid invite, the invite code gets stored into a signed, http-only cookie in the user's browser.
 
 If a user without an active invite signs up, he or she receives the default role, as defined by the `admin` plugin. That is `"user"` by default, but you might want to reserve that for invited users, and set the default role to `"guest"` for clarity.
 
-If a user with an active invite signs up or signs in, his or her role gets upgraded.
+If a user with default role and an active invite signs up or signs in, his or her role gets upgraded.
 
 ## Alternatives
 
@@ -75,7 +75,7 @@ const auth = betterAuth({
 - `roleForSignupWithoutInvite` (string, required): The role assigned by the `admin` plugin to users who sign up without an active invite.
 - `roleForSignupWithInvite` (string, required): The role assigned to users who sign up with a valid, active invite.
 - `canCreateInvite` (function, optional): A function `(user: UserWithRole) => boolean` that determines if a given user can create invites. If not provided, any authenticated user who is not in the `roleForSignupWithoutInvite` can create invites.
-- [TODO] `canAcceptInvite` (function, optional): A function `(user: UserWithRole) => boolean` that determines if a given user can accept/redeem an invite. If not provided, any user can accept an invite.
+- `[TODO]` `canAcceptInvite` (function, optional): A function `(user: UserWithRole) => boolean` that determines if a given user can activate an invite. If not provided, any user can accept an invite.
 - `generateCode` (function, optional): A function `() => string` that returns a string to be used as the invite code. Defaults to a cryptographically strong random string generator (6 characters, 0-9, A-Z).
 - `getDate` (function, optional): A function `() => Date` that returns the current `Date`. Defaults to `() => new Date()`. Useful for testing time-sensitive features.
 
@@ -119,47 +119,47 @@ if (data) {
 }
 ```
 
-The server will handle storing this invite code, associating it with the creating user, and setting its expiry based on `inviteDurationSeconds`.
+The server will handle storing this invite code, associating it with the creating user, and setting its expiry based on `inviteDurationSeconds`. By default, an invite can be used once (`maxUses: 1`).
 
-### 2. Redeeming Invites
+### 2. Activating Invites
 
-When a user receives an invite code, he or she needs to redeem it. This is typically done by visiting a specific link or entering the code on a page. The client plugin (`client.invite.redeem`) provides a method to handle this.
+When a user receives an invite code, he or she needs to activate it. This is typically done by visiting a specific link or entering the code on a page. The client plugin (`client.invite.activate`) provides a method to handle this.
 
 ```typescript
 // Assuming 'client' is your configured better-auth client instance
 
-async function redeemInvite(code: string) {
-  const { data, error } = await client.invite.redeem({ code });
+async function activateInvite(code: string) {
+  const { data, error } = await client.invite.activate({ code });
 
   if (error) {
-    console.error("Failed to redeem invite:", error);
+    console.error("Failed to activate invite:", error);
     // Handle error (e.g., code invalid, expired, already used)
     return false;
   }
 
-  // On successful redemption, a cookie named 'better-auth.invite-code'
+  // On successful activation, a cookie named 'better-auth.invite-code'
   // is set in the user's browser. This cookie will be used during sign-up.
-  console.log("Invite redeemed successfully. User can now sign up.");
+  console.log("Invite activated successfully. User can now sign up.");
   return true;
 }
 ```
 
 ### 3. Signing Up
 
-The invite system integrates with the standard sign-up process. The behavior depends on whether a user has an active, redeemed invite.
+The invite system integrates with the standard sign-up and sign-in process. The behavior depends on whether a user has an active, activated invite.
 
 **Scenario 1: Signing Up or Signing In with an Active Invite**
 
-1.  **Redeem Invite**: The user first redeems an invite code (see "Redeeming Invites"). This sets a `better-auth.invite-code` cookie.
-2.  **Sign Up**: The user proceeds to sign up (e.g., using email and password).
-3.  **Role Upgrade**: If a valid `better-auth.invite-code` cookie is present, the invite is validated. Additionally, if a `canAcceptInvite` function is configured, it is evaluated for the user. If all conditions are met and the user's initial role (as defined by `roleForSignupWithoutInvite`) is appropriate for an upgrade:
+1.  **Activate Invite**: The user first activates an invite code (see "Activating Invites"). This sets a `better-auth.invite-code` cookie.
+2.  **Sign Up / Sign In**: The user proceeds to sign up or sign in (e.g., using email and password).
+3.  **Role Upgrade**: If a valid `better-auth.invite-code` cookie is present and the user's current role is `roleForSignupWithoutInvite`, the invite is validated. If the invite is valid:
     - The user's role is upgraded to `roleForSignupWithInvite`.
     - The invite code is marked as used in the database.
     - The `better-auth.invite-code` cookie is cleared.
 
 ```typescript
 // Assuming 'client' is your configured better-auth client instance
-// and the user has already redeemed an invite code (the 'better-auth.invite-code' cookie is set).
+// and the user has already activated an invite code (the 'better-auth.invite-code' cookie is set).
 
 async function signUpNewUserWithInvite(email, password, name) {
   const { data, error } = await client.signUp.email({
@@ -188,7 +188,7 @@ async function signUpNewUserWithInvite(email, password, name) {
 
 Users can also sign up without an invite code. This is useful to implement waiting lists.
 
-1.  **Sign Up**: The user signs up directly without redeeming an invite, or if their redeemed invite is invalid, expired, or already used.
+1.  **Sign Up**: The user signs up directly without activating an invite, or if their activated invite is invalid, expired, or already used.
 2.  **Default Role**:
     - The user is created with the default role as defined in the `admin` plugin.
     - The `invite` plugin does not run.
@@ -224,14 +224,24 @@ async function signUpNewUserWithoutInvite(email, password, name) {
 
 ## Database Schema
 
-The invite plugin adds an `invite` table to your database. Key fields include:
+The invite plugin adds two tables to your database: `invite` and `invite_use`.
+
+#### `invite` table
+
+Stores the invite codes.
 
 - `code` (string, unique): The invite code.
-- `invitedByUserId` (string, references `user.id`): The ID of the user who created the invite.
-- `usedByUserId` (string, optional, references `user.id`): The ID of the user who used the invite.
-- `used` (boolean): Whether the invite has been used.
+- `createdByUserId` (string, references `user.id`): The ID of the user who created the invite.
+- `maxUses` (number): The maximum number of times the invite can be used.
 - `createdAt` (date): Timestamp of creation.
 - `expiresAt` (date): Timestamp when the invite expires.
-- `usedAt` (date, optional): Timestamp when the invite was used.
+
+#### `invite_use` table
+
+Tracks each use of an invite.
+
+- `inviteId` (string, references `invite.id`): The ID of the invite being used.
+- `usedByUserId` (string, references `user.id`): The ID of the user who used the invite.
+- `usedAt` (date): Timestamp when the invite was used.
 
 This schema is managed by `better-auth` migrations when the plugin is active and `shouldRunMigrations: true` is set during initialization.
