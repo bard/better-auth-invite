@@ -1,7 +1,7 @@
 import { getTestInstance } from "@better-auth-kit/tests";
 import { type User, betterAuth } from "better-auth";
 import { parseSetCookieHeader } from "better-auth/cookies";
-import { hashPassword } from "better-auth/crypto";
+import { generateRandomString, hashPassword } from "better-auth/crypto";
 import { admin as adminPlugin } from "better-auth/plugins";
 import { createAccessControl } from "better-auth/plugins/access";
 import {
@@ -10,7 +10,7 @@ import {
   userAc,
 } from "better-auth/plugins/admin/access";
 import Database from "better-sqlite3";
-import { assert, test as baseTest, expect } from "vitest";
+import { assert, test as baseTest, expect, vi } from "vitest";
 import { type InviteClientPlugin, inviteClient } from "./client.js";
 import { type InviteOptions, invite } from "./index.js";
 
@@ -23,8 +23,10 @@ const admin = ac.newRole({ ...adminAc.statements });
 const test = baseTest.extend<{
   createAuth: ({
     pluginOptions,
+    advancedOptions,
   }: {
     pluginOptions: InviteOptions;
+    advancedOptions?: { database: { generateId: () => string } };
   }) => ReturnType<
     typeof getTestInstance<{
       plugins: Array<InviteClientPlugin>;
@@ -34,9 +36,15 @@ const test = baseTest.extend<{
   createAuth: async ({ task: _task }, use) => {
     const database = new Database(":memory:");
 
-    await use(async ({ pluginOptions }: { pluginOptions: InviteOptions }) => {
-      const testInstance = await getTestInstance(
-        betterAuth({
+    await use(
+      async ({
+        pluginOptions,
+        advancedOptions,
+      }: {
+        pluginOptions: InviteOptions;
+        advancedOptions?: { database: { generateId: () => string } };
+      }) => {
+        const auth = betterAuth({
           database,
           plugins: [
             adminPlugin({
@@ -47,34 +55,36 @@ const test = baseTest.extend<{
             invite(pluginOptions),
           ],
           emailAndPassword: { enabled: true },
-        }),
-        {
+          advanced: advancedOptions,
+        });
+
+        const testInstance = await getTestInstance(auth, {
           shouldRunMigrations: true,
           clientOptions: { plugins: [inviteClient()] },
-        },
-      );
+        });
 
-      const { db, testUser } = testInstance;
+        const { db, testUser } = testInstance;
 
-      const { id: userId } = await db.create({
-        model: "user",
-        data: { ...testUser, role: "user" },
-      });
+        const { id: userId } = await db.create({
+          model: "user",
+          data: { ...testUser, role: "user" },
+        });
 
-      await db.create({
-        model: "account",
-        data: {
-          password: await hashPassword(testUser.password),
-          accountId: crypto.randomUUID(),
-          providerId: "credential",
-          userId,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        },
-      });
+        await db.create({
+          model: "account",
+          data: {
+            password: await hashPassword(testUser.password),
+            accountId: generateRandomString(16),
+            providerId: "credential",
+            userId,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        });
 
-      return testInstance;
-    });
+        return testInstance;
+      },
+    );
 
     database.close();
   },
@@ -109,10 +119,14 @@ test("user without invite receives default role upon signup and invite is marked
   });
 });
 
-test("user with invite receives upgraded role upon signup; invite is marked as used", async ({
+test("user signing up with active and valid invite receives upgraded role", async ({
   createAuth,
 }) => {
-  const getDate = () => new Date("2025-01-01T10:00:00");
+  const getDate = vi
+    .fn()
+    .mockReturnValueOnce(new Date("2025-01-01T10:00:00Z"))
+    .mockReturnValueOnce(new Date("2025-01-01T10:01:00Z"));
+
   const { client, testUser, db } = await createAuth({
     pluginOptions: {
       inviteDurationSeconds: 3600,
@@ -123,23 +137,21 @@ test("user with invite receives upgraded role upon signup; invite is marked as u
     },
   });
 
-  const invitingUser = await db.findOne<User>({
+  // biome-ignore lint/suspicious/noExplicitAny:
+  const invitingUser = await db.findOne<any>({
     model: "user",
     where: [{ field: "email", value: testUser.email }],
   });
-
-  assert(invitingUser);
 
   await db.create({
     model: "invite",
     data: {
       code: "invite-123",
-      invitedByUserId: invitingUser.id,
-      usedByUserId: null,
-      createdAt: getDate(),
-      updatedAt: getDate(),
-      expiresAt: new Date(getDate().getTime() + 3600_000),
-      usedAt: null,
+      createdByUserId: invitingUser.id,
+      maxUses: 1,
+      createdAt: new Date("2025-01-01T10:00:00.000Z"),
+      updatedAt: new Date("2025-01-01T10:00:00.000Z"),
+      expiresAt: new Date("2025-01-01T23:59:00.000Z"),
     },
   });
 
@@ -154,7 +166,8 @@ test("user with invite receives upgraded role upon signup; invite is marked as u
 
   expect(error).toBe(null);
 
-  const invitedUser = await db.findOne<User>({
+  // biome-ignore lint/suspicious/noExplicitAny:
+  const invitedUser = await db.findOne<any>({
     model: "user",
     where: [{ field: "email", value: "newuser@example.com" }],
   });
@@ -163,23 +176,102 @@ test("user with invite receives upgraded role upon signup; invite is marked as u
     role: "user",
   });
 
-  const invite = await db.findOne({
+  // biome-ignore lint/suspicious/noExplicitAny:
+  const invite = await db.findOne<any>({
     model: "invite",
     where: [{ field: "code", value: "invite-123" }],
   });
 
   expect(invite).toMatchObject({
-    usedAt: new Date("2025-01-01T09:00:00Z"),
+    code: "invite-123",
+    createdAt: new Date("2025-01-01T10:00:00.000Z"),
+    expiresAt: new Date("2025-01-01T23:59:00.000Z"),
+    createdByUserId: invitingUser.id,
+  });
+});
+
+test("when an invite is used, a record is created", async ({ createAuth }) => {
+  const getDate = vi
+    .fn()
+    .mockReturnValueOnce(new Date("2025-01-01T10:00:00Z"))
+    .mockReturnValueOnce(new Date("2025-01-01T10:01:00Z"));
+
+  const { client, testUser, db } = await createAuth({
+    pluginOptions: {
+      inviteDurationSeconds: 3600,
+      getDate,
+      generateCode: () => "invite-123",
+      roleForSignupWithoutInvite: "guest",
+      roleForSignupWithInvite: "user",
+    },
+  });
+
+  // biome-ignore lint/suspicious/noExplicitAny:
+  const invitingUser = await db.findOne<any>({
+    model: "user",
+    where: [{ field: "email", value: testUser.email }],
+  });
+
+  await db.create({
+    model: "invite",
+    data: {
+      code: "invite-123",
+      createdByUserId: invitingUser.id,
+      maxUses: 1,
+      createdAt: new Date("2025-01-01T10:00:00.000Z"),
+      updatedAt: new Date("2025-01-01T10:00:00.000Z"),
+      expiresAt: new Date("2025-01-01T23:59:00.000Z"),
+    },
+  });
+
+  const { data } = await client.signUp.email({
+    email: "newuser@example.com",
+    password: "password123",
+    name: "New User",
+    fetchOptions: {
+      headers: new Headers({ cookie: "better-auth.invite-code=invite-123" }),
+    },
+  });
+
+  assert(data);
+  const { user: invitedUser } = data;
+
+  // biome-ignore lint/suspicious/noExplicitAny:
+  const invite = await db.findOne<any>({
+    model: "invite",
+    where: [{ field: "code", value: "invite-123" }],
+  });
+
+  expect(invite).toMatchObject({
+    code: "invite-123",
+    createdAt: new Date("2025-01-01T10:00:00.000Z"),
+    expiresAt: new Date("2025-01-01T23:59:00.000Z"),
+    createdByUserId: invitingUser.id,
+  });
+
+  // biome-ignore lint/suspicious/noExplicitAny:
+  const inviteUse = await db.findOne<any>({
+    model: "invite_use",
+    where: [{ field: "inviteId", value: invite.id }],
+  });
+
+  expect(inviteUse).toMatchObject({
+    inviteId: invite.id,
+    usedAt: new Date("2025-01-01T10:01:00.000Z"),
+    usedByUserId: invitedUser.id,
   });
 });
 
 test("signed-in user with full access can create an invite", async ({
   createAuth,
 }) => {
+  const getDate = vi
+    .fn()
+    .mockReturnValueOnce(new Date("2025-01-01T10:00:00.000Z"));
   const { client, testUser, db } = await createAuth({
     pluginOptions: {
       inviteDurationSeconds: 3600,
-      getDate: () => new Date("2025-01-01T10:00:00"),
+      getDate,
       generateCode: () => "invite-123",
       roleForSignupWithoutInvite: "guest",
       roleForSignupWithInvite: "user",
@@ -219,25 +311,26 @@ test("signed-in user with full access can create an invite", async ({
   assert(inviteCreationResponse.data);
 
   const { code } = inviteCreationResponse.data;
-  const invite = await db.findOne({
+  // biome-ignore lint/suspicious/noExplicitAny:
+  const invite = await db.findOne<any>({
     model: "invite",
     where: [{ field: "code", value: code }],
   });
 
   expect(invite).toMatchObject({
     code: "invite-123",
-    invitedByUserId: user.id,
-    usedByUserId: "null", // correctly stored as null in the database, but `transformOutput` in create-adapter/index.ts for some reason stringifies it
-    createdAt: new Date("2025-01-01T09:00:00Z"),
-    expiresAt: new Date("2025-01-01T10:00:00Z"),
-    usedAt: null,
+    createdByUserId: user.id,
+    createdAt: new Date("2025-01-01T10:00:00Z"),
+    expiresAt: new Date("2025-01-01T11:00:00Z"),
   });
 });
 
-test("when user redeems invite, invite code gets stored in a cryptographically signed http-only cookie", async ({
+test("when user accepts invite, invite code gets stored in a cryptographically signed http-only cookie", async ({
   createAuth,
 }) => {
-  const getDate = () => new Date("2025-01-01T10:00:00");
+  const getDate = vi
+    .fn()
+    .mockReturnValueOnce(new Date("2025-01-01T10:00:00.000Z"));
   const { client, testUser, db } = await createAuth({
     pluginOptions: {
       inviteDurationSeconds: 3600,
@@ -258,17 +351,16 @@ test("when user redeems invite, invite code gets stored in a cryptographically s
     model: "invite",
     data: {
       code: "invite-123",
-      invitedByUserId: user.id,
-      usedByUserId: null,
-      createdAt: getDate(),
-      updatedAt: getDate(),
-      expiresAt: new Date(getDate().getTime() + 3600_000),
-      usedAt: null,
+      createdByUserId: user.id,
+      maxUses: 1,
+      createdAt: new Date("2025-01-01T10:00:00.000Z"),
+      updatedAt: new Date("2025-01-01T10:00:00.000Z"),
+      expiresAt: new Date("2025-01-01T23:59:00.000Z"),
     },
   });
 
   let inviteCode: string | null = null;
-  await client.invite.redeem(
+  await client.invite.activate(
     { code: "invite-123" },
     {
       onSuccess(context) {
@@ -335,10 +427,13 @@ test("user with guest role cannot create invites", async ({ createAuth }) => {
 test("custom runtime criteria can decide whether a user can create invites", async ({
   createAuth,
 }) => {
+  const getDate = vi
+    .fn()
+    .mockReturnValueOnce(new Date("2025-01-01T10:00:00.000Z"));
   const { client, testUser } = await createAuth({
     pluginOptions: {
       inviteDurationSeconds: 3600,
-      getDate: () => new Date("2025-01-01T10:00:00"),
+      getDate,
       generateCode: () => "invite-123",
       roleForSignupWithoutInvite: "guest",
       roleForSignupWithInvite: "user",
@@ -378,15 +473,148 @@ test("custom runtime criteria can decide whether a user can create invites", asy
   `);
 });
 
-test.todo("custom runtime criteria can decide whether a user can  invites");
+test("attempting to activate invite already used maxUses times causes error", async ({
+  createAuth,
+}) => {
+  const getDate = vi
+    .fn()
+    .mockReturnValueOnce(new Date("2025-01-01T10:00:00.000Z"))
+    .mockReturnValueOnce(new Date("2025-01-01T10:00:00.000Z"))
+    .mockReturnValueOnce(new Date("2025-01-01T10:00:00.000Z"));
+  const { client, testUser, db } = await createAuth({
+    pluginOptions: {
+      inviteDurationSeconds: 3600,
+      getDate,
+      generateCode: () => "invite-123",
+      roleForSignupWithoutInvite: "guest",
+      roleForSignupWithInvite: "user",
+    },
+  });
+
+  const user = await db.findOne<User>({
+    model: "user",
+    where: [{ field: "email", value: testUser.email }],
+  });
+
+  assert(user);
+  await db.create({
+    model: "invite",
+    data: {
+      code: "invite-123",
+      createdByUserId: user.id,
+      maxUses: 1,
+      createdAt: new Date("2025-01-01T10:00:00.000Z"),
+      updatedAt: new Date("2025-01-01T10:00:00.000Z"),
+      expiresAt: new Date("2025-01-01T23:59:00.000Z"),
+    },
+  });
+
+  const firstInviteUseResponse = await client.invite.activate({
+    code: "invite-123",
+  });
+
+  expect(firstInviteUseResponse.error).toBe(null);
+
+  await client.signUp.email({
+    email: "newuser@example.com",
+    password: "password123",
+    name: "New User",
+    fetchOptions: {
+      headers: new Headers({ cookie: "better-auth.invite-code=invite-123" }),
+    },
+  });
+
+  const secondInviteUseResponse = await client.invite.activate({
+    code: "invite-123",
+  });
+
+  expect(secondInviteUseResponse.error).toMatchInlineSnapshot(`
+    {
+      "code": "NO_USES_LEFT_FOR_INVITE_CODE",
+      "message": "No uses left for invite code",
+      "status": 400,
+      "statusText": "BAD_REQUEST",
+    }
+  `);
+});
+
+test("invite cannot be used more than maxUses times, even if it's already active", async ({
+  createAuth,
+}) => {
+  const getDate = vi
+    .fn()
+    .mockReturnValueOnce(new Date("2025-01-01T10:00:00Z"))
+    .mockReturnValueOnce(new Date("2025-01-01T10:01:00Z"))
+    .mockReturnValueOnce(new Date("2025-01-01T10:02:00Z"))
+    .mockReturnValueOnce(new Date("2025-01-01T10:03:00Z"));
+
+  const { client, testUser, db } = await createAuth({
+    pluginOptions: {
+      inviteDurationSeconds: 3600,
+      getDate,
+      generateCode: () => "invite-123",
+      roleForSignupWithoutInvite: "guest",
+      roleForSignupWithInvite: "user",
+    },
+  });
+
+  // biome-ignore lint/suspicious/noExplicitAny:
+  const invitingUser = await db.findOne<any>({
+    model: "user",
+    where: [{ field: "email", value: testUser.email }],
+  });
+
+  await db.create({
+    model: "invite",
+    data: {
+      code: "invite-123",
+      createdByUserId: invitingUser.id,
+      maxUses: 1,
+      createdAt: new Date("2025-01-01T10:00:00.000Z"),
+      updatedAt: new Date("2025-01-01T10:00:00.000Z"),
+      expiresAt: new Date("2025-01-01T23:59:00.000Z"),
+    },
+  });
+
+  const firstSignupResponse = await client.signUp.email({
+    email: "newuser1@example.com",
+    password: "password123",
+    name: "New User 1",
+    fetchOptions: {
+      headers: new Headers({ cookie: "better-auth.invite-code=invite-123" }),
+    },
+  });
+
+  expect(firstSignupResponse.error).toBe(null);
+
+  const secondSignupResponse = await client.signUp.email({
+    email: "newuser2@example.com",
+    password: "password123",
+    name: "New User 2",
+    fetchOptions: {
+      headers: new Headers({ cookie: "better-auth.invite-code=invite-123" }),
+    },
+  });
+
+  expect(secondSignupResponse.error).toMatchInlineSnapshot(`
+    {
+      "code": "NO_USES_LEFT_FOR_INVITE_CODE",
+      "message": "No uses left for invite code",
+      "status": 400,
+      "statusText": "BAD_REQUEST",
+    }
+  `);
+});
+
+test.todo("attempting to activate non-existing invite causes error");
+
+test.todo("attempting to activate expired invite causes error");
 
 test.todo("after successful sign-in, invite cookie is cleared");
 
 test.todo(
   "custom runtime criteria for invite creation override default role check",
 );
-
-test.todo("used invite cannot be used again");
 
 test.todo("works with email signin");
 

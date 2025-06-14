@@ -18,9 +18,10 @@ export interface InviteOptions {
 }
 
 type Invite = {
+  id: string;
   code: string;
+  maxUses: number;
   expiresAt: Date;
-  usedAt: Date | null;
 };
 
 export const invite = (options: InviteOptions) => {
@@ -36,6 +37,8 @@ export const invite = (options: InviteOptions) => {
     INSUFFICIENT_PERMISSIONS:
       "User does not have sufficient permissions to create invite",
     NO_SUCH_USER: "No such user",
+    NO_USES_LEFT_FOR_INVITE_CODE: "No uses left for invite code",
+    INVALID_OR_EXPIRED_INVITE: "Invalid or expired invite code",
   } as const;
 
   return {
@@ -93,18 +96,18 @@ export const invite = (options: InviteOptions) => {
             model: "invite",
             data: {
               code,
-              invitedByUserId: user.id,
-              usedByUserId: null,
+              createdByUserId: user.id,
               createdAt: now,
               expiresAt,
+              maxUses: 1,
             },
           });
 
           return ctx.json({ code }, { status: 201 });
         },
       ),
-      redeem: createAuthEndpoint(
-        "/invite/redeem",
+      activate: createAuthEndpoint(
+        "/invite/activate",
         {
           method: "POST",
           body: z.object({
@@ -119,14 +122,33 @@ export const invite = (options: InviteOptions) => {
             where: [{ field: "code", value: code }],
           });
 
-          if (!invite) {
-            return ctx.redirect("/auth/signin?error=invalid_invite");
+          if (invite === null) {
+            throw ctx.error("BAD_REQUEST", {
+              message: ERROR_CODES.INVALID_OR_EXPIRED_INVITE,
+            });
+          }
+
+          const timesUsed = await ctx.context.adapter.count({
+            model: "invite_use",
+            where: [{ field: "inviteId", value: invite.id }],
+          });
+
+          if (!(timesUsed < invite.maxUses)) {
+            throw ctx.error("BAD_REQUEST", {
+              message: ERROR_CODES.NO_USES_LEFT_FOR_INVITE_CODE,
+            });
+          }
+
+          if (opts.getDate() > invite.expiresAt) {
+            throw ctx.error("BAD_REQUEST", {
+              message: ERROR_CODES.INVALID_OR_EXPIRED_INVITE,
+            });
           }
 
           ctx.setCookie("better-auth.invite-code", code, {
             httpOnly: true,
             path: "/",
-            expires: invite.expiresAt ? new Date(invite.expiresAt) : undefined,
+            expires: invite.expiresAt,
           });
 
           return ctx.json({}, { status: 200 });
@@ -185,14 +207,20 @@ export const invite = (options: InviteOptions) => {
               return;
             }
 
-            // Additional check: ensure invite is not already used
-            if (invite.usedAt !== null) {
+            if (invite.expiresAt < opts.getDate()) {
+              // TODO should throw error?
               return;
             }
 
-            // Additional check: ensure invite is not expired
-            if (invite.expiresAt.getTime() < opts.getDate().getTime()) {
-              return;
+            const timesUsed = await ctx.context.adapter.count({
+              model: "invite_use",
+              where: [{ field: "inviteId", value: invite.id }],
+            });
+
+            if (!(timesUsed < invite.maxUses)) {
+              throw ctx.error("BAD_REQUEST", {
+                message: ERROR_CODES.NO_USES_LEFT_FOR_INVITE_CODE,
+              });
             }
 
             await ctx.context.adapter.update({
@@ -202,10 +230,11 @@ export const invite = (options: InviteOptions) => {
             });
 
             const usageDate = opts.getDate();
-            await ctx.context.adapter.update({
-              model: "invite",
-              where: [{ field: "code", value: inviteCode }],
-              update: {
+
+            await ctx.context.adapter.create({
+              model: "invite_use",
+              data: {
+                inviteId: invite.id,
                 usedByUserId: userId,
                 usedAt: usageDate,
               },
@@ -225,18 +254,28 @@ export const invite = (options: InviteOptions) => {
       invite: {
         fields: {
           code: { type: "string", unique: true },
-          invitedByUserId: {
+          createdAt: { type: "date", defaultValue: () => opts.getDate() },
+          expiresAt: { type: "date", required: true },
+          maxUses: { type: "number", required: true },
+          createdByUserId: {
             type: "string",
             references: { model: "user", field: "id", onDelete: "set null" },
           },
+        },
+      },
+      invite_use: {
+        fields: {
+          inviteId: {
+            type: "string",
+            required: true,
+            references: { model: "invite", field: "id", onDelete: "set null" },
+          },
+          usedAt: { type: "date", required: true },
           usedByUserId: {
             type: "string",
             required: false,
             references: { model: "user", field: "id", onDelete: "set null" },
           },
-          createdAt: { type: "date", defaultValue: () => opts.getDate() },
-          expiresAt: { type: "date", required: true },
-          usedAt: { type: "date", required: false },
         },
       },
     },
